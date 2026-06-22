@@ -6,9 +6,11 @@ import logging
 import mimetypes
 import re
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from typing import Any
 
 from groq import Groq
+from PIL import Image
 
 from app.core.config import get_settings
 
@@ -71,9 +73,24 @@ def _parse_json_payload(raw: str) -> dict[str, Any]:
 
 def _image_data_url(image_path: str, mime_type: str | None) -> str:
     path = Path(image_path)
+
+    try:
+        with Image.open(path) as img:
+            if img.width > 1024:
+                ratio = 1024 / img.width
+                img = img.resize((1024, int(img.height * ratio)))
+
+            with NamedTemporaryFile(suffix=".jpg", delete=False) as temp_file:
+                temp_path = Path(temp_file.name)
+
+            img.convert("RGB").save(temp_path, format="JPEG", quality=75, optimize=True)
+            image_bytes = temp_path.read_bytes()
+    except Exception:
+        image_bytes = path.read_bytes()
+
     guessed_mime_type, _ = mimetypes.guess_type(path.name)
     resolved_mime_type = mime_type or guessed_mime_type or "image/jpeg"
-    encoded = base64.b64encode(path.read_bytes()).decode("utf-8")
+    encoded = base64.b64encode(image_bytes).decode("utf-8")
     return f"data:{resolved_mime_type};base64,{encoded}"
 
 
@@ -121,10 +138,18 @@ def _build_messages(
     messages.append(
         {
             "role": "user",
-            "content": (
-                f"{' '.join(prompt_text)}\n\n"
-                f"Image (base64 data URL): {_image_data_url(image_path, mime_type)}"
-            ),
+            "content": [
+                {
+                    "type": "text",
+                    "text": " ".join(prompt_text),
+                },
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": _image_data_url(image_path, mime_type),
+                    },
+                },
+            ],
         }
     )
     return messages
